@@ -23,7 +23,7 @@ public class StaticDataController(StaticDataService staticDataService)
             Header: new()
             {
                 ["Pragma"] = "cache",
-                ["CacheControl"] = "public, max-age=31536000",  // 1y
+                ["Cache-Control"] = "public, max-age=31536000",  // 1y
                 ["Expires"] = DateTime.UtcNow.AddYears(1).ToString("R"),
             }
         );
