@@ -1,0 +1,163 @@
+name: Publish Docker image
+
+# Publishes the monolith image only — no desktop builds, no tag, no GitHub release.
+# The registry path follows the repository owner, so this works on a fork
+# without diverging from upstream.
+
+on:
+  workflow_dispatch: # manual trigger
+    inputs:
+      dry-run:
+        description: Build without pushing anything
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write # ghcr
+
+jobs:
+  prepare:
+    name: Resolve image name & version
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      version: ${{ steps.get-version.outputs.version }}
+      major_minor: ${{ steps.compute.outputs.major_minor }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name
+        id: image
+        # ghcr rejects uppercase, and the owner is not lowercase on every fork
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pkvault" >> $GITHUB_OUTPUT
+
+      - name: Extract version from directory props
+        id: get-version
+        uses: KageKirin/get-csproj-version@v0
+        with:
+          file: "./Directory.Build.props"
+
+      - name: Compute major/minor
+        id: compute
+        run: |
+          VERSION=${{ steps.get-version.outputs.version }}
+          echo "major_minor=${VERSION%.*}" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build monolith image
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm # native, avoids qemu emulation
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set env variables
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+          echo "VERSION=${{ needs.prepare.outputs.version }}" >> $GITHUB_ENV
+          echo "VCS_REF=${GITHUB_SHA}" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: ${{ !inputs.dry-run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build monolith image for digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: monolith
+          platforms: ${{ matrix.platform }}
+          tags: ${{ needs.prepare.outputs.image }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            VCS_REF=${{ env.VCS_REF }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          push: ${{ !inputs.dry-run }}
+          provenance: false # avoid "unknown/unknown" platform in ghcr
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,push-by-digest=${{ !inputs.dry-run }},name-canonical=true,push=${{ !inputs.dry-run }}
+
+      - name: Export digest
+        if: ${{ !inputs.dry-run }}
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: ${{ !inputs.dry-run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: Push manifest
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ needs.prepare.outputs.image }}
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=${{ needs.prepare.outputs.major_minor }}
+            type=raw,value=latest
+            type=sha
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ needs.prepare.outputs.image }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ needs.prepare.outputs.image }}:${{ steps.meta.outputs.version }}
