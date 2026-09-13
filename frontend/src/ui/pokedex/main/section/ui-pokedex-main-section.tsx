@@ -1,5 +1,6 @@
 import { Group } from '@mantine/core';
 import React from 'react';
+import { VISIBILITY_MARGIN } from '../../../visibility/visibility-margin';
 import { VisibilityObserver } from '../../../visibility/visibility-observer';
 import { Route } from '../../../../routes/pokedex';
 
@@ -24,7 +25,7 @@ export const UIPokedexMainSection: React.FC<UIPokedexMainSectionProps> = ({ isFi
     });
 
     return <Group ref={ref} gap='sm' py='md'>
-        <VisibilityObserver ref={ref} margin='600px' initialValue={initialVisible}>
+        <VisibilityObserver ref={ref} margin={VISIBILITY_MARGIN} initialValue={initialVisible}>
             {children}
         </VisibilityObserver>
     </Group>;

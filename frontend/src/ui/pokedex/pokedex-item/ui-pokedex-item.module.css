@@ -11,6 +11,14 @@
     /* font-size: 1rem; */
 }
 
+/* offscreen items: same footprint as .button, without any component */
+.ui-pokedex-item .placeholder {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--mantine-spacing-sm);
+    max-width: 100%;
+}
+
 .species {
     position: absolute;
     top: 0;
